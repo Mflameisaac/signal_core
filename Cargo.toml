@@ -3,8 +3,10 @@ name = "signal-core"
 version = "0.1.0"
 edition = "2021"
 description = "Domain-agnostic signal-processing primitives (FFT, windowing, filtering, peak detection, resampling), shared across audio and time-series applications via native Rust or WASM."
-license = "MIT"
-# Set `repository` once this is pushed to its actual private git host.
+license = "MIT OR Apache-2.0"
+keywords = ["dsp", "fft", "signal-processing", "wasm", "filtering"]
+categories = ["algorithms", "science", "wasm"]
+# Set `repository` once this is pushed to its actual public git host.
 
 [lib]
 name = "signal_core"

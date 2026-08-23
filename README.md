@@ -165,4 +165,13 @@ when you want to pick up changes.
 
 ## License
 
-MIT — see `LICENSE`.
+Dual-licensed under either of:
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option — this is the standard convention for Rust crates, and lets
+consumers pick whichever license fits their own project's requirements.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this crate is licensed as above, without any
+additional terms or conditions.
