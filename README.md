@@ -5,18 +5,19 @@ windowing, filtering, peak/transient detection, and downsampling — for any
 real-valued time series. Compiled once, in Rust, and consumed either as a
 native Cargo dependency or as a WASM+JS package.
 
-This library exists to be shared between two otherwise-unrelated
-applications: an audio/podcast editor and a stock-market analysis tool.
-Everything here operates on a plain `&[f32]` series plus explicit parameters
-like sample rate — nothing in this crate knows or assumes it's looking at
-audio or price data. Domain-specific concepts ("silence detection",
-"anomaly detection") are just this crate's generic primitives (peak
-detection, flat-region detection) called with app-specific threshold
-tuning, and that tuning happens in the consuming app, not here.
+This library is designed for reuse across unrelated numeric domains —
+audio processing and financial time-series analysis are both examples of
+where the same primitives apply unchanged. Everything here operates on a
+plain `&[f32]` series plus explicit parameters like sample rate — nothing
+in this crate knows or assumes it's looking at audio or price data.
+Domain-specific concepts ("silence detection", "anomaly detection") are
+just this crate's generic primitives (peak detection, flat-region
+detection) called with app-specific threshold tuning, and that tuning
+happens in the consuming app, not here.
 
-This repo is **not** a workspace member of either downstream app. It's an
-independent, independently-versioned crate that both apps pull in as a
-dependency.
+This repo is **not** a workspace member of any downstream app. It's an
+independent, independently-versioned crate that consuming apps pull in as
+a dependency.
 
 ## What's in it
 
