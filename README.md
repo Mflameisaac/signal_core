@@ -147,6 +147,114 @@ when you want to pick up changes.
    its fields as JS getters — see `pkg/signal_core.d.ts` after building for
    the exact, generated signatures.
 
+## API reference
+
+Full signatures always live in the source (`cargo doc --open` generates
+browsable docs from the doc comments in each module) — this section is a
+quicker, example-driven tour of every public function, including a plain-
+language explanation of the DSP concept for anyone newer to signal
+processing.
+
+### `window` — shaping a series before FFT
+
+FFT math implicitly assumes the series repeats forever. A raw slice of
+samples almost never actually loops smoothly, so the FFT sees a sharp
+"seam" at the edges and reports fake extra frequencies (called
+*spectral leakage*) that aren't really in the signal. A window function
+tapers the edges of the series down toward zero before the FFT so that
+seam disappears.
+
+- `WindowType` — enum: `Rectangular` (no tapering — the default/no-op),
+  `Hann`, `Hamming`, `Blackman` (increasingly aggressive tapering; Hann is
+  the most common general-purpose choice).
+- `window_coefficients(window: WindowType, len: usize) -> Vec<f32>` —
+  the raw multiplier for each of `len` positions, if you want to inspect
+  or reuse them directly.
+- `apply_window(samples: &[f32], window: WindowType) -> Vec<f32>` —
+  multiplies `samples` by the window's coefficients, returning a new
+  vector the same length as the input. Use this right before
+  `fft::forward_fft` / `fft::power_spectrum`.
+
+### `fft` — frequency-domain analysis
+
+- `forward_fft(samples: &[f32]) -> Vec<Complex32>` — the raw FFT. Converts
+  a series from "value over time" into "how much of each frequency is
+  present," as complex numbers (real + imaginary parts encode both
+  amplitude and phase per frequency bin). Most callers want
+  `power_spectrum` or `dominant_frequency` instead of this directly.
+- `power_spectrum(samples: &[f32]) -> Vec<f32>` — the FFT's magnitude
+  squared, one-sided (only DC through Nyquist — the redundant mirrored
+  half of a real-valued signal's spectrum is dropped). This is "how much
+  energy is at each frequency," which is what you plot as a spectrogram
+  bar or feed into peak-picking.
+- `dominant_frequency(samples: &[f32], sample_rate_hz: f32) -> Option<DominantFrequency>` —
+  convenience wrapper that runs `power_spectrum` and returns the single
+  strongest non-DC frequency bin, converted from a bin index into Hz
+  using `sample_rate_hz`. Returns `None` for inputs under 2 samples.
+  `DominantFrequency` has two fields: `frequency_hz` and `power`.
+
+### `filter` — smoothing and frequency-selective filtering
+
+- `moving_average(samples: &[f32], window_size: usize) -> Vec<f32>` — for
+  each sample, averages it together with its neighbors within
+  `window_size / 2` on each side (the window shrinks near the array edges
+  rather than reading out of bounds). Flattens noise/jitter; the bigger
+  `window_size`, the smoother — and blurrier — the result.
+- `low_pass_filter(samples: &[f32], sample_rate_hz: f32, cutoff_hz: f32) -> Vec<f32>` —
+  lets slow changes through, damps fast ones. A single-pole (first-order
+  RC-equivalent) filter — simple and cheap, not a "brick wall": frequencies
+  right at `cutoff_hz` are attenuated by about half power (-3dB), and it
+  keeps attenuating more gradually above that, rather than cutting off
+  sharply.
+- `high_pass_filter(samples: &[f32], sample_rate_hz: f32, cutoff_hz: f32) -> Vec<f32>` —
+  the mirror image of `low_pass_filter`: damps slow changes, lets fast ones
+  through. Useful for removing a slowly drifting baseline/DC offset.
+
+### `peaks` — finding interesting points or regions
+
+These are the primitives domain-specific "detectors" get built from —
+see [Design notes](#design-notes) below for why nothing here is named
+`detect_silence` or `detect_anomaly`.
+
+- `PeakConfig { min_height: Option<f32>, min_distance: usize }` — tuning
+  knobs for `find_local_maxima`. `min_height` discards peaks below a
+  value; `min_distance` discards peaks too close to a taller
+  already-accepted peak (so one wide bump doesn't get reported as ten
+  separate near-duplicate peaks).
+- `find_local_maxima(samples: &[f32], config: &PeakConfig) -> Vec<usize>` —
+  indices where the series turns from rising to falling (a local hump).
+- `find_transients(samples: &[f32], threshold: f32) -> Vec<usize>` —
+  indices where the value jumps by more than `threshold` from the
+  previous sample — i.e. a sudden, sharp change rather than a gradual
+  hump. This is the primitive that powers "transient detection" in audio
+  or "sudden price move" detection in a price series.
+- `find_flat_regions(samples: &[f32], amplitude_threshold: f32, min_length: usize) -> Vec<(usize, usize)>` —
+  contiguous `(start, end)` index ranges (end exclusive) where every
+  sample's absolute value stays at or under `amplitude_threshold`, and the
+  range is at least `min_length` samples long. Tune the threshold near
+  the noise floor for silence detection, or near an expected-volatility
+  band for "nothing interesting is happening here" detection in a price
+  series.
+
+### `resample` — rendering large series efficiently
+
+- `downsample_average(samples: &[f32], factor: usize) -> Vec<f32>` —
+  splits the series into chunks of `factor` samples and averages each
+  chunk down to one point. Simple and cheap, but a brief spike gets
+  smeared out and can disappear entirely.
+- `downsample_minmax(samples: &[f32], num_buckets: usize) -> Vec<f32>` —
+  the standard "waveform view" technique: splits into `num_buckets`
+  chunks and keeps the *min and max* of each chunk (returned flattened,
+  in chronological order per pair, so the output length is always
+  `2 * num_buckets`). Unlike `downsample_average`, a single loud spike
+  still shows up as a tall bar, because the max of its chunk is preserved
+  exactly.
+- `linear_resample(samples: &[f32], target_len: usize) -> Vec<f32>` —
+  resamples to *any* target length (not just an integer downsampling
+  factor) by linearly interpolating between the nearest input samples.
+  Works for both shrinking and growing the series; the first and last
+  output samples always exactly match the first and last input samples.
+
 ## Design notes
 
 - **f32 throughout.** Internal computation and the WASM boundary both use
