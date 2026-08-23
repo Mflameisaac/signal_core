@@ -272,6 +272,24 @@ see [Design notes](#design-notes) below for why nothing here is named
   assumed — pass your audio sample rate in Hz, or your bar/tick interval
   as a rate, and frequency-domain results come back in the same units.
 
+## Further reading
+
+If you're new to digital signal processing and want the theory behind
+what this crate implements (FFT, windowing, filtering), roughly in order
+of increasing depth:
+
+1. [*The Scientist and Engineer's Guide to Digital Signal Processing*](https://www.dspguide.com/)
+   by Steven W. Smith — free online, and the most approachable starting
+   point: practical and light on formal math.
+2. *Understanding Digital Signal Processing* by Richard G. Lyons — the
+   standard "practical engineer's" DSP book; covers FFT, spectral
+   leakage/windowing, and filter design in more depth than the Smith
+   book, still without requiring a heavy signals-and-systems background.
+3. *Discrete-Time Signal Processing* by Alan V. Oppenheim and Ronald W.
+   Schafer — the rigorous academic reference most university DSP courses
+   are built around. Worth it once the practical books' explanations
+   raise questions the practical books don't answer.
+
 ## License
 
 Dual-licensed under either of:
