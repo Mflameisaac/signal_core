@@ -6,7 +6,7 @@ description = "Domain-agnostic signal-processing primitives (FFT, windowing, fil
 license = "MIT OR Apache-2.0"
 keywords = ["dsp", "fft", "signal-processing", "wasm", "filtering"]
 categories = ["algorithms", "science", "wasm"]
-# Set `repository` once this is pushed to its actual public git host.
+repository = "https://github.com/Mflameisaac/signal_core"
 
 [lib]
 name = "signal_core"

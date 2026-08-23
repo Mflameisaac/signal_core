@@ -69,7 +69,7 @@ repo directly via Cargo's git dependency support — no publishing required:
 ```toml
 # In the consuming app's Cargo.toml
 [dependencies]
-signal-core = { git = "ssh://git@github.com/YOUR_ORG/signal-core.git", tag = "v0.1.0" }
+signal-core = { git = "ssh://git@github.com/Mflameisaac/signal_core.git", tag = "v0.1.0" }
 ```
 
 Pin to a `tag` (or `rev` for a specific commit) rather than tracking a
