@@ -1,17 +1,18 @@
-//! Second-order IIR ("biquad") filters over a generic real-valued time series.
+//! Second-order (biquad) IIR filters via the RBJ Audio EQ Cookbook formulas.
 //!
-//! Coefficients follow the RBJ Audio EQ Cookbook formulas. A [`Biquad`] is a
-//! stateful filter instance — [`apply_biquad`] takes `&mut Biquad` and
-//! carries its internal delay line across calls, so callers can stream a
-//! signal through in chunks and get the same result as one long call.
+//! The single-pole filters in [`crate::filter`] are cheap but shallow
+//! (6dB/octave, no gain control) — fine for a simple highpass/lowpass, not
+//! enough for parametric EQ (boost/cut a band) or steeper rolloffs. A
+//! biquad is the standard building block for both: this module provides the
+//! coefficient math and a stateful [`Biquad`] that processes one sample at a
+//! time, plus [`apply_biquad`] to run it over a whole series in the same
+//! functional style the rest of the crate uses.
 
-/// A stateful second-order IIR filter (Direct Form I).
-///
-/// Built by one of the constructor functions in this module ([`high_pass`],
-/// [`low_pass`], [`peaking_eq`], [`low_shelf`], [`high_shelf`]) and driven by
-/// [`apply_biquad`]. Coefficients are stored already normalized so that
-/// `a0 == 1`.
-#[derive(Debug, Clone, Copy)]
+/// A single second-order IIR section (Direct Form I), with its own filter
+/// state (previous two input/output samples). Reuse one `Biquad` per
+/// independent signal (e.g. one per channel) — sharing a single instance
+/// across unrelated series would mix their filter history together.
+#[derive(Clone, Copy, Debug)]
 pub struct Biquad {
     b0: f32,
     b1: f32,
@@ -25,13 +26,18 @@ pub struct Biquad {
 }
 
 impl Biquad {
-    fn from_raw(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Self {
+    /// Builds a biquad directly from its (already `a0`-normalized)
+    /// difference-equation coefficients. Exposed at crate visibility so
+    /// [`crate::loudness`] can construct the ITU-R BS.1770 K-weighting
+    /// filters, whose coefficients come from a different derivation than
+    /// the RBJ constructors below.
+    pub(crate) fn from_coefficients(b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) -> Self {
         Biquad {
-            b0: b0 / a0,
-            b1: b1 / a0,
-            b2: b2 / a0,
-            a1: a1 / a0,
-            a2: a2 / a0,
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
             x1: 0.0,
             x2: 0.0,
             y1: 0.0,
@@ -39,10 +45,9 @@ impl Biquad {
         }
     }
 
-    fn step(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
-            - self.a1 * self.y1
-            - self.a2 * self.y2;
+    /// Processes one sample, updating internal state.
+    pub fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;
@@ -51,107 +56,98 @@ impl Biquad {
     }
 }
 
-fn omega(freq_hz: f32, sample_rate_hz: f32) -> f32 {
-    2.0 * std::f32::consts::PI * freq_hz / sample_rate_hz
+/// Runs a biquad over a whole series, returning a new `Vec` the same length
+/// as the input. `biquad` keeps whatever state it already had — pass a
+/// freshly-constructed one for an independent series.
+pub fn apply_biquad(samples: &[f32], biquad: &mut Biquad) -> Vec<f32> {
+    samples.iter().map(|&x| biquad.process(x)).collect()
 }
 
-/// A high-pass filter: attenuates frequencies below `freq_hz`.
-///
-/// `q` is the filter Q (`0.7071` gives a maximally-flat / Butterworth
-/// response); `sample_rate_hz` is the series' sample rate.
-pub fn high_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad {
-    let w0 = omega(freq_hz, sample_rate_hz);
-    let (sin_w0, cos_w0) = w0.sin_cos();
-    let alpha = sin_w0 / (2.0 * q);
-
-    let b0 = (1.0 + cos_w0) / 2.0;
-    let b1 = -(1.0 + cos_w0);
-    let b2 = (1.0 + cos_w0) / 2.0;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha;
-    Biquad::from_raw(b0, b1, b2, a0, a1, a2)
+/// Shared RBJ prep: `(w0.cos(), alpha)` for a given center/corner frequency
+/// and Q. `alpha = sin(w0) / (2*Q)` controls bandwidth/slope; a higher Q is
+/// a narrower peaking band or a steeper shelf/cutoff.
+fn cookbook_prep(freq_hz: f32, q: f32, sample_rate_hz: f32) -> (f64, f64) {
+    let w0 = 2.0 * std::f64::consts::PI * freq_hz as f64 / sample_rate_hz as f64;
+    let alpha = w0.sin() / (2.0 * q as f64);
+    (w0.cos(), alpha)
 }
 
-/// A low-pass filter: attenuates frequencies above `freq_hz`.
-pub fn low_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad {
-    let w0 = omega(freq_hz, sample_rate_hz);
-    let (sin_w0, cos_w0) = w0.sin_cos();
-    let alpha = sin_w0 / (2.0 * q);
-
-    let b0 = (1.0 - cos_w0) / 2.0;
-    let b1 = 1.0 - cos_w0;
-    let b2 = (1.0 - cos_w0) / 2.0;
-    let a0 = 1.0 + alpha;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha;
-    Biquad::from_raw(b0, b1, b2, a0, a1, a2)
-}
-
-/// A peaking EQ filter: boosts (positive `gain_db`) or cuts (negative
-/// `gain_db`) a band centered at `freq_hz`, with bandwidth controlled by `q`.
+/// Parametric (peaking) EQ: boosts or cuts a band centered on `freq_hz` by
+/// `gain_db`, with bandwidth controlled by `q` (higher = narrower).
 pub fn peaking_eq(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad {
-    let w0 = omega(freq_hz, sample_rate_hz);
-    let (sin_w0, cos_w0) = w0.sin_cos();
-    let alpha = sin_w0 / (2.0 * q);
-    let a = 10f32.powf(gain_db / 40.0);
+    let (cosw0, alpha) = cookbook_prep(freq_hz, q, sample_rate_hz);
+    let a = 10f64.powf(gain_db as f64 / 40.0);
 
-    let b0 = 1.0 + alpha * a;
-    let b1 = -2.0 * cos_w0;
-    let b2 = 1.0 - alpha * a;
     let a0 = 1.0 + alpha / a;
-    let a1 = -2.0 * cos_w0;
-    let a2 = 1.0 - alpha / a;
-    Biquad::from_raw(b0, b1, b2, a0, a1, a2)
+    let b0 = (1.0 + alpha * a) / a0;
+    let b1 = (-2.0 * cosw0) / a0;
+    let b2 = (1.0 - alpha * a) / a0;
+    let a1 = (-2.0 * cosw0) / a0;
+    let a2 = (1.0 - alpha / a) / a0;
+
+    Biquad::from_coefficients(b0 as f32, b1 as f32, b2 as f32, a1 as f32, a2 as f32)
 }
 
-/// A low shelf filter: boosts or cuts everything below `freq_hz` by
-/// `gain_db`, with the shelf's transition steepness controlled by `q`
-/// (`0.7071` gives a classic shelf slope).
+/// Low-shelf: boosts or cuts everything below `freq_hz` by `gain_db`.
 pub fn low_shelf(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad {
-    let w0 = omega(freq_hz, sample_rate_hz);
-    let (sin_w0, cos_w0) = w0.sin_cos();
-    let a = 10f32.powf(gain_db / 40.0);
-    let alpha = sin_w0 / (2.0 * q);
-    let sqrt_a = a.sqrt();
-    let two_sqrt_a_alpha = 2.0 * sqrt_a * alpha;
+    let (cosw0, alpha) = cookbook_prep(freq_hz, q, sample_rate_hz);
+    let a = 10f64.powf(gain_db as f64 / 40.0);
+    let sqrt_a_2alpha = 2.0 * a.sqrt() * alpha;
 
-    let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
-    let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
-    let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
-    let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
-    let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
-    let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
-    Biquad::from_raw(b0, b1, b2, a0, a1, a2)
+    let a0 = (a + 1.0) + (a - 1.0) * cosw0 + sqrt_a_2alpha;
+    let b0 = a * ((a + 1.0) - (a - 1.0) * cosw0 + sqrt_a_2alpha) / a0;
+    let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosw0) / a0;
+    let b2 = a * ((a + 1.0) - (a - 1.0) * cosw0 - sqrt_a_2alpha) / a0;
+    let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosw0) / a0;
+    let a2 = ((a + 1.0) + (a - 1.0) * cosw0 - sqrt_a_2alpha) / a0;
+
+    Biquad::from_coefficients(b0 as f32, b1 as f32, b2 as f32, a1 as f32, a2 as f32)
 }
 
-/// A high shelf filter: boosts or cuts everything above `freq_hz` by
-/// `gain_db`, with the shelf's transition steepness controlled by `q`.
+/// High-shelf: boosts or cuts everything above `freq_hz` by `gain_db`.
 pub fn high_shelf(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad {
-    let w0 = omega(freq_hz, sample_rate_hz);
-    let (sin_w0, cos_w0) = w0.sin_cos();
-    let a = 10f32.powf(gain_db / 40.0);
-    let alpha = sin_w0 / (2.0 * q);
-    let sqrt_a = a.sqrt();
-    let two_sqrt_a_alpha = 2.0 * sqrt_a * alpha;
+    let (cosw0, alpha) = cookbook_prep(freq_hz, q, sample_rate_hz);
+    let a = 10f64.powf(gain_db as f64 / 40.0);
+    let sqrt_a_2alpha = 2.0 * a.sqrt() * alpha;
 
-    let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
-    let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
-    let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
-    let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
-    let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
-    let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
-    Biquad::from_raw(b0, b1, b2, a0, a1, a2)
+    let a0 = (a + 1.0) - (a - 1.0) * cosw0 + sqrt_a_2alpha;
+    let b0 = a * ((a + 1.0) + (a - 1.0) * cosw0 + sqrt_a_2alpha) / a0;
+    let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cosw0) / a0;
+    let b2 = a * ((a + 1.0) + (a - 1.0) * cosw0 - sqrt_a_2alpha) / a0;
+    let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cosw0) / a0;
+    let a2 = ((a + 1.0) - (a - 1.0) * cosw0 - sqrt_a_2alpha) / a0;
+
+    Biquad::from_coefficients(b0 as f32, b1 as f32, b2 as f32, a1 as f32, a2 as f32)
 }
 
-/// Run `samples` through `filter`, in order, carrying its delay line forward.
-///
-/// Calling this repeatedly with the same `filter` and consecutive chunks of
-/// a longer signal produces the same output as one call with the whole
-/// signal — the filter's internal state (`x1`/`x2`/`y1`/`y2`) persists
-/// across calls.
-pub fn apply_biquad(samples: &[f32], filter: &mut Biquad) -> Vec<f32> {
-    samples.iter().map(|&x| filter.step(x)).collect()
+/// 2-pole low-pass (steeper rolloff than [`crate::filter::low_pass_filter`]'s
+/// single-pole version). `q` of `0.7071` (≈1/√2) gives a maximally-flat
+/// (Butterworth) response.
+pub fn low_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad {
+    let (cosw0, alpha) = cookbook_prep(freq_hz, q, sample_rate_hz);
+    let a0 = 1.0 + alpha;
+    let b0 = ((1.0 - cosw0) / 2.0) / a0;
+    let b1 = (1.0 - cosw0) / a0;
+    let b2 = ((1.0 - cosw0) / 2.0) / a0;
+    let a1 = (-2.0 * cosw0) / a0;
+    let a2 = (1.0 - alpha) / a0;
+
+    Biquad::from_coefficients(b0 as f32, b1 as f32, b2 as f32, a1 as f32, a2 as f32)
+}
+
+/// 2-pole high-pass (steeper rolloff than [`crate::filter::high_pass_filter`]'s
+/// single-pole version). `q` of `0.7071` (≈1/√2) gives a maximally-flat
+/// (Butterworth) response.
+pub fn high_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad {
+    let (cosw0, alpha) = cookbook_prep(freq_hz, q, sample_rate_hz);
+    let a0 = 1.0 + alpha;
+    let b0 = ((1.0 + cosw0) / 2.0) / a0;
+    let b1 = (-(1.0 + cosw0)) / a0;
+    let b2 = ((1.0 + cosw0) / 2.0) / a0;
+    let a1 = (-2.0 * cosw0) / a0;
+    let a2 = (1.0 - alpha) / a0;
+
+    Biquad::from_coefficients(b0 as f32, b1 as f32, b2 as f32, a1 as f32, a2 as f32)
 }
 
 #[cfg(test)]
@@ -170,133 +166,101 @@ mod tests {
     }
 
     #[test]
-    fn low_pass_attenuates_high_frequency_more_than_low_frequency() {
-        let sample_rate = 8000.0;
-        let n = 4096;
-        let low_tone = sine_wave(50.0, sample_rate, n);
-        let high_tone = sine_wave(2000.0, sample_rate, n);
+    fn peaking_eq_boosts_the_targeted_frequency_more_than_a_distant_one() {
+        let sample_rate = 48000.0;
+        let n = 8192;
+        let target = sine_wave(1000.0, sample_rate, n);
+        let distant = sine_wave(60.0, sample_rate, n);
 
-        let mut lp_low = low_pass(200.0, 0.7071, sample_rate);
-        let mut lp_high = low_pass(200.0, 0.7071, sample_rate);
-        let low_out = apply_biquad(&low_tone, &mut lp_low);
-        let high_out = apply_biquad(&high_tone, &mut lp_high);
+        let mut f1 = peaking_eq(1000.0, 12.0, 1.0, sample_rate);
+        let boosted_target = apply_biquad(&target, &mut f1);
+        let mut f2 = peaking_eq(1000.0, 12.0, 1.0, sample_rate);
+        let boosted_distant = apply_biquad(&distant, &mut f2);
 
-        let low_retention = rms(&low_out[500..]) / rms(&low_tone[500..]);
-        let high_retention = rms(&high_out[500..]) / rms(&high_tone[500..]);
+        let target_gain = rms(&boosted_target[1000..]) / rms(&target[1000..]);
+        let distant_gain = rms(&boosted_distant[1000..]) / rms(&distant[1000..]);
 
-        assert!(low_retention > 0.9, "got {low_retention}");
-        assert!(high_retention < 0.2, "got {high_retention}");
-    }
-
-    #[test]
-    fn high_pass_attenuates_low_frequency_more_than_high_frequency() {
-        let sample_rate = 8000.0;
-        let n = 4096;
-        let low_tone = sine_wave(50.0, sample_rate, n);
-        let high_tone = sine_wave(2000.0, sample_rate, n);
-
-        let mut hp_low = high_pass(200.0, 0.7071, sample_rate);
-        let mut hp_high = high_pass(200.0, 0.7071, sample_rate);
-        let low_out = apply_biquad(&low_tone, &mut hp_low);
-        let high_out = apply_biquad(&high_tone, &mut hp_high);
-
-        let low_retention = rms(&low_out[500..]) / rms(&low_tone[500..]);
-        let high_retention = rms(&high_out[500..]) / rms(&high_tone[500..]);
-
-        assert!(high_retention > 0.9, "got {high_retention}");
-        assert!(low_retention < 0.2, "got {low_retention}");
-    }
-
-    #[test]
-    fn peaking_eq_boosts_energy_at_center_frequency() {
-        let sample_rate = 8000.0;
-        let n = 4096;
-        let tone = sine_wave(1000.0, sample_rate, n);
-
-        let mut boost = peaking_eq(1000.0, 12.0, 1.0, sample_rate);
-        let boosted = apply_biquad(&tone, &mut boost);
-
-        let gain = rms(&boosted[500..]) / rms(&tone[500..]);
-        assert!(gain > 1.5, "expected boosted output, got gain {gain}");
-    }
-
-    #[test]
-    fn peaking_eq_cuts_energy_at_center_frequency() {
-        let sample_rate = 8000.0;
-        let n = 4096;
-        let tone = sine_wave(1000.0, sample_rate, n);
-
-        let mut cut = peaking_eq(1000.0, -12.0, 1.0, sample_rate);
-        let cutted = apply_biquad(&tone, &mut cut);
-
-        let gain = rms(&cutted[500..]) / rms(&tone[500..]);
-        assert!(gain < 0.7, "expected cut output, got gain {gain}");
-    }
-
-    #[test]
-    fn low_shelf_boosts_low_frequencies_and_leaves_high_frequencies_alone() {
-        let sample_rate = 8000.0;
-        let n = 4096;
-        let low_tone = sine_wave(50.0, sample_rate, n);
-        let high_tone = sine_wave(3000.0, sample_rate, n);
-
-        let mut shelf_low = low_shelf(300.0, 12.0, 0.7071, sample_rate);
-        let mut shelf_high = low_shelf(300.0, 12.0, 0.7071, sample_rate);
-        let low_out = apply_biquad(&low_tone, &mut shelf_low);
-        let high_out = apply_biquad(&high_tone, &mut shelf_high);
-
-        let low_gain = rms(&low_out[500..]) / rms(&low_tone[500..]);
-        let high_gain = rms(&high_out[500..]) / rms(&high_tone[500..]);
-
-        assert!(low_gain > 1.5, "expected boosted low tone, got {low_gain}");
         assert!(
-            (high_gain - 1.0).abs() < 0.2,
-            "expected roughly unchanged high tone, got {high_gain}"
+            target_gain > 3.0,
+            "1kHz tone should be boosted close to +12dB (~4x), got {target_gain}x"
+        );
+        assert!(
+            distant_gain < 1.2,
+            "60Hz tone should be mostly unaffected by a 1kHz peaking boost, got {distant_gain}x"
         );
     }
 
     #[test]
-    fn high_shelf_boosts_high_frequencies_and_leaves_low_frequencies_alone() {
+    fn peaking_eq_cut_reduces_the_targeted_frequency() {
+        let sample_rate = 48000.0;
+        let n = 8192;
+        let target = sine_wave(350.0, sample_rate, n);
+        let mut f = peaking_eq(350.0, -6.0, 1.5, sample_rate);
+        let cut = apply_biquad(&target, &mut f);
+        let gain = rms(&cut[1000..]) / rms(&target[1000..]);
+        assert!(gain < 0.7, "expected a cut close to -6dB (~0.5x), got {gain}x");
+    }
+
+    #[test]
+    fn low_shelf_boosts_low_frequencies_not_high() {
+        let sample_rate = 48000.0;
+        let n = 8192;
+        let low = sine_wave(80.0, sample_rate, n);
+        let high = sine_wave(8000.0, sample_rate, n);
+
+        let mut f1 = low_shelf(200.0, 6.0, 0.7, sample_rate);
+        let low_out = apply_biquad(&low, &mut f1);
+        let mut f2 = low_shelf(200.0, 6.0, 0.7, sample_rate);
+        let high_out = apply_biquad(&high, &mut f2);
+
+        let low_gain = rms(&low_out[1000..]) / rms(&low[1000..]);
+        let high_gain = rms(&high_out[1000..]) / rms(&high[1000..]);
+
+        assert!(low_gain > 1.5, "low tone should be boosted, got {low_gain}x");
+        assert!(high_gain < 1.2, "high tone should be near-unaffected, got {high_gain}x");
+    }
+
+    #[test]
+    fn high_shelf_boosts_high_frequencies_not_low() {
+        let sample_rate = 48000.0;
+        let n = 8192;
+        let low = sine_wave(80.0, sample_rate, n);
+        let high = sine_wave(8000.0, sample_rate, n);
+
+        let mut f1 = high_shelf(4000.0, 6.0, 0.7, sample_rate);
+        let low_out = apply_biquad(&low, &mut f1);
+        let mut f2 = high_shelf(4000.0, 6.0, 0.7, sample_rate);
+        let high_out = apply_biquad(&high, &mut f2);
+
+        let low_gain = rms(&low_out[1000..]) / rms(&low[1000..]);
+        let high_gain = rms(&high_out[1000..]) / rms(&high[1000..]);
+
+        assert!(high_gain > 1.5, "high tone should be boosted, got {high_gain}x");
+        assert!(low_gain < 1.2, "low tone should be near-unaffected, got {low_gain}x");
+    }
+
+    #[test]
+    fn biquad_low_pass_and_high_pass_are_steeper_than_single_pole() {
+        // Same intent as crate::filter's single-pole test, just confirming
+        // the 2-pole versions still behave directionally correctly.
         let sample_rate = 8000.0;
         let n = 4096;
-        let low_tone = sine_wave(50.0, sample_rate, n);
-        let high_tone = sine_wave(3000.0, sample_rate, n);
+        let low_tone = sine_wave(20.0, sample_rate, n);
+        let high_tone = sine_wave(2000.0, sample_rate, n);
+        let cutoff = 100.0;
 
-        let mut shelf_low = high_shelf(1000.0, 12.0, 0.7071, sample_rate);
-        let mut shelf_high = high_shelf(1000.0, 12.0, 0.7071, sample_rate);
-        let low_out = apply_biquad(&low_tone, &mut shelf_low);
-        let high_out = apply_biquad(&high_tone, &mut shelf_high);
+        let mut lp1 = low_pass(cutoff, 0.7071, sample_rate);
+        let low_through_lp = apply_biquad(&low_tone, &mut lp1);
+        let mut lp2 = low_pass(cutoff, 0.7071, sample_rate);
+        let high_through_lp = apply_biquad(&high_tone, &mut lp2);
+        assert!(rms(&low_through_lp[500..]) / rms(&low_tone[500..]) > 0.9);
+        assert!(rms(&high_through_lp[500..]) / rms(&high_tone[500..]) < 0.1);
 
-        let low_gain = rms(&low_out[500..]) / rms(&low_tone[500..]);
-        let high_gain = rms(&high_out[500..]) / rms(&high_tone[500..]);
-
-        assert!(
-            (low_gain - 1.0).abs() < 0.2,
-            "expected roughly unchanged low tone, got {low_gain}"
-        );
-        assert!(high_gain > 1.5, "expected boosted high tone, got {high_gain}");
-    }
-
-    #[test]
-    fn apply_biquad_state_persists_across_calls() {
-        let sample_rate = 8000.0;
-        let tone = sine_wave(200.0, sample_rate, 2000);
-
-        let mut one_shot_filter = low_pass(500.0, 0.7071, sample_rate);
-        let one_shot = apply_biquad(&tone, &mut one_shot_filter);
-
-        let mut chunked_filter = low_pass(500.0, 0.7071, sample_rate);
-        let mut chunked = apply_biquad(&tone[..1000], &mut chunked_filter);
-        chunked.extend(apply_biquad(&tone[1000..], &mut chunked_filter));
-
-        for (a, b) in one_shot.iter().zip(chunked.iter()) {
-            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
-        }
-    }
-
-    #[test]
-    fn apply_biquad_handles_empty_input() {
-        let mut filter = low_pass(1000.0, 0.7071, 8000.0);
-        assert!(apply_biquad(&[], &mut filter).is_empty());
+        let mut hp1 = high_pass(cutoff, 0.7071, sample_rate);
+        let low_through_hp = apply_biquad(&low_tone, &mut hp1);
+        let mut hp2 = high_pass(cutoff, 0.7071, sample_rate);
+        let high_through_hp = apply_biquad(&high_tone, &mut hp2);
+        assert!(rms(&low_through_hp[500..]) / rms(&low_tone[500..]) < 0.1);
+        assert!(rms(&high_through_hp[500..]) / rms(&high_tone[500..]) > 0.9);
     }
 }

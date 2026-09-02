@@ -10,7 +10,7 @@
 use js_sys::{Float32Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use crate::{fft, filter, peaks, resample, window};
+use crate::{biquad, dynamics, fft, filter, loudness, peaks, resample, window};
 
 #[cfg(feature = "console_error_panic_hook")]
 #[wasm_bindgen(js_name = initPanicHook)]
@@ -154,6 +154,94 @@ pub fn low_pass_filter(samples: &Float32Array, sample_rate_hz: f32, cutoff_hz: f
 pub fn high_pass_filter(samples: &Float32Array, sample_rate_hz: f32, cutoff_hz: f32) -> Float32Array {
     let input = to_f32_vec(samples);
     to_f32_array(filter::high_pass_filter(&input, sample_rate_hz, cutoff_hz))
+}
+
+// ---------------------------------------------------------------------
+// Biquad EQ (parametric/shelf, 2-pole low/high-pass)
+// ---------------------------------------------------------------------
+
+#[wasm_bindgen(js_name = peakingEq)]
+pub fn peaking_eq(samples: &Float32Array, freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    let mut b = biquad::peaking_eq(freq_hz, gain_db, q, sample_rate_hz);
+    to_f32_array(biquad::apply_biquad(&input, &mut b))
+}
+
+#[wasm_bindgen(js_name = lowShelf)]
+pub fn low_shelf(samples: &Float32Array, freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    let mut b = biquad::low_shelf(freq_hz, gain_db, q, sample_rate_hz);
+    to_f32_array(biquad::apply_biquad(&input, &mut b))
+}
+
+#[wasm_bindgen(js_name = highShelf)]
+pub fn high_shelf(samples: &Float32Array, freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    let mut b = biquad::high_shelf(freq_hz, gain_db, q, sample_rate_hz);
+    to_f32_array(biquad::apply_biquad(&input, &mut b))
+}
+
+#[wasm_bindgen(js_name = biquadLowPass)]
+pub fn biquad_low_pass(samples: &Float32Array, freq_hz: f32, q: f32, sample_rate_hz: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    let mut b = biquad::low_pass(freq_hz, q, sample_rate_hz);
+    to_f32_array(biquad::apply_biquad(&input, &mut b))
+}
+
+#[wasm_bindgen(js_name = biquadHighPass)]
+pub fn biquad_high_pass(samples: &Float32Array, freq_hz: f32, q: f32, sample_rate_hz: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    let mut b = biquad::high_pass(freq_hz, q, sample_rate_hz);
+    to_f32_array(biquad::apply_biquad(&input, &mut b))
+}
+
+// ---------------------------------------------------------------------
+// Dynamics (compressor / limiter)
+// ---------------------------------------------------------------------
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn compress(
+    samples: &Float32Array,
+    sample_rate_hz: f32,
+    threshold_db: f32,
+    ratio: f32,
+    attack_ms: f32,
+    release_ms: f32,
+    makeup_db: f32,
+) -> Float32Array {
+    let input = to_f32_vec(samples);
+    to_f32_array(dynamics::compress(
+        &input,
+        sample_rate_hz,
+        threshold_db,
+        ratio,
+        attack_ms,
+        release_ms,
+        makeup_db,
+    ))
+}
+
+#[wasm_bindgen]
+pub fn limit(samples: &Float32Array, sample_rate_hz: f32, ceiling_db: f32, release_ms: f32) -> Float32Array {
+    let input = to_f32_vec(samples);
+    to_f32_array(dynamics::limit(&input, sample_rate_hz, ceiling_db, release_ms))
+}
+
+// ---------------------------------------------------------------------
+// Loudness (ITU-R BS.1770)
+// ---------------------------------------------------------------------
+
+#[wasm_bindgen(js_name = integratedLoudness)]
+pub fn integrated_loudness(samples: &Float32Array, sample_rate_hz: f32, channels: usize) -> f32 {
+    let input = to_f32_vec(samples);
+    loudness::integrated_loudness(&input, sample_rate_hz, channels)
+}
+
+#[wasm_bindgen(js_name = truePeakDb)]
+pub fn true_peak_db(samples: &Float32Array) -> f32 {
+    let input = to_f32_vec(samples);
+    loudness::true_peak_db(&input)
 }
 
 // ---------------------------------------------------------------------
