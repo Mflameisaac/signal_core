@@ -31,7 +31,7 @@ a dependency.
 | `loudness` | ITU-R BS.1770 K-weighted gated integrated loudness (LUFS) and an oversampled true-peak estimate |
 | `peaks` | Local maxima, sample-to-sample transient detection, flat/silent region detection |
 | `resample` | Decimation-by-average, min/max envelope downsampling, arbitrary-length linear resampling |
-| `wasm` | Thin `wasm-bindgen` wrappers over most of the above (only compiled for `wasm32` targets; `biquad`/`dynamics`/`loudness` don't have bindings yet — see [Design notes](#design-notes)) |
+| `wasm` | Thin `wasm-bindgen` wrappers over all of the above (only compiled for `wasm32` targets) |
 
 Every function is unit-tested against synthetic reference signals (e.g. a
 known-frequency sine wave for FFT peak detection, a known spike for
@@ -220,10 +220,11 @@ sharper frequency response than `filter`'s single-pole filters, at the
 cost of being stateful (it remembers the last two inputs and outputs).
 Coefficients here follow the RBJ Audio EQ Cookbook formulas.
 
-- `Biquad` — an opaque, stateful filter instance returned by the
-  constructors below. Carries its own internal delay line, so feeding it
-  a signal in chunks across multiple `apply_biquad` calls gives the same
-  result as one call with the whole signal.
+- `Biquad` — a stateful filter instance returned by the constructors
+  below, with a `process(&mut self, x: f32) -> f32` method for one
+  sample at a time. Carries its own internal delay line, so feeding it a
+  signal in chunks across multiple `apply_biquad` calls (or `process`
+  calls) gives the same result as one call with the whole signal.
 - `high_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad` /
   `low_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad` — damp
   everything below/above `freq_hz`, with a much steeper rolloff than
@@ -256,10 +257,13 @@ apply a gain curve to that envelope.
   recovers; `makeup_gain_db` is a flat gain applied afterward to
   compensate for the average level lost to compression.
 - `limit(samples: &[f32], sample_rate_hz: f32, ceiling_db: f32, release_ms: f32) -> Vec<f32>` —
-  a brickwall limiter: guarantees no output sample exceeds `ceiling_db`
-  in magnitude. Gain reduction engages instantly (so the ceiling is never
-  crossed) and recovers over `release_ms` once the signal drops back
-  down, to avoid audible pumping.
+  a lookahead peak limiter: guarantees no output sample exceeds
+  `ceiling_db` in magnitude, by scanning a few milliseconds ahead of each
+  sample for the loudest upcoming peak and reducing gain in advance —
+  since this runs offline over a whole in-memory buffer, lookahead is
+  "free" (no real-time output delay to manage). Gain reduction is instant;
+  it recovers back toward unity over `release_ms` once a peak has passed,
+  to avoid audible pumping.
 
 ### `loudness` — perceptual loudness and true-peak estimation
 
@@ -276,11 +280,11 @@ apply a gain curve to that envelope.
   (`1.0`); this omits BS.1770's surround-channel weighting (`1.41` for
   rear channels), since this crate targets mono/stereo material.
 - `true_peak_db(samples: &[f32]) -> f32` — an inter-sample peak estimate
-  in dBFS, via 4x oversampling with Catmull-Rom cubic interpolation. A
-  plain sample-peak measurement can miss a peak that falls *between* two
-  samples and would clip on D/A conversion or resampling; this catches
-  most of those without needing a full polyphase reconstruction filter
-  (see [Design notes](#design-notes)).
+  in dBFS, via FFT-based bandlimited interpolation (zero-padding each
+  block's spectrum 4x and inverse-transforming). A plain sample-peak
+  measurement can miss a peak that falls *between* two samples and would
+  clip on D/A conversion or resampling; this recovers the true
+  continuous-time peak instead.
 
 ### `peaks` — finding interesting points or regions
 
@@ -343,20 +347,12 @@ see [Design notes](#design-notes) below for why nothing here is named
 - **Sample rate / interval is always an explicit parameter**, never
   assumed — pass your audio sample rate in Hz, or your bar/tick interval
   as a rate, and frequency-domain results come back in the same units.
-- **`true_peak_db` is a pragmatic approximation, not a certified
-  meter.** ITU-R BS.1770 Annex 2 specifies a proper polyphase FIR
-  reconstruction filter for true-peak oversampling; this crate instead
-  uses 4x oversampling via Catmull-Rom cubic interpolation, which is
-  self-contained (no FIR filter design/state needed) and catches most
-  real inter-sample overshoots, but won't match a certified meter to the
-  last hundredth of a dB.
-- **`biquad`/`dynamics`/`loudness` don't have `wasm` bindings yet.**
-  Every other module gets a thin `wasm-bindgen` wrapper in `wasm.rs`
-  (see that module's doc comment); these three were added to satisfy a
-  native (Cargo path dependency) consumer and haven't needed a WASM
-  consumer yet. Adding bindings for them should follow the same
-  thin-wrapper pattern as the rest of `wasm.rs` when a WASM consumer
-  needs them — no signal-processing logic should move into `wasm.rs`.
+- **`true_peak_db` reuses one FFT plan pair across blocks.** An earlier
+  version replanned the FFT per block with an arbitrary block+margin
+  size; on a real multi-minute file in an unoptimized build that measured
+  60+ seconds. Processing in fixed power-of-two windows with one reused
+  forward/inverse `rustfft` plan pair fixed that — see
+  `true_peak_of_block`'s doc comment in `loudness.rs`.
 
 ## Further reading
 
