@@ -9,8 +9,11 @@
 //! See the crate README for build/consumption instructions (native Rust via
 //! Cargo git dependency, or WASM via `wasm-pack build`).
 
+pub mod biquad;
+pub mod dynamics;
 pub mod fft;
 pub mod filter;
+pub mod loudness;
 pub mod peaks;
 pub mod resample;
 pub mod window;
