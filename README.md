@@ -26,6 +26,9 @@ a dependency.
 | `window` | `Hann`, `Hamming`, `Blackman`, `Rectangular` window coefficients + application |
 | `fft` | Forward FFT (via `rustfft`), one-sided power spectrum, dominant-frequency detection |
 | `filter` | Centered moving average, single-pole low-pass / high-pass filters |
+| `biquad` | Second-order IIR filters (RBJ cookbook) — low/high-pass, low/high shelf, peaking EQ |
+| `dynamics` | Feed-forward compressor and brickwall peak limiter, log-domain envelope following |
+| `loudness` | ITU-R BS.1770 K-weighted gated integrated loudness (LUFS) and an oversampled true-peak estimate |
 | `peaks` | Local maxima, sample-to-sample transient detection, flat/silent region detection |
 | `resample` | Decimation-by-average, min/max envelope downsampling, arbitrary-length linear resampling |
 | `wasm` | Thin `wasm-bindgen` wrappers over all of the above (only compiled for `wasm32` targets) |
@@ -210,6 +213,79 @@ seam disappears.
   the mirror image of `low_pass_filter`: damps slow changes, lets fast ones
   through. Useful for removing a slowly drifting baseline/DC offset.
 
+### `biquad` — second-order IIR filters
+
+A biquad is a two-pole, two-zero IIR filter — one stage buys a much
+sharper frequency response than `filter`'s single-pole filters, at the
+cost of being stateful (it remembers the last two inputs and outputs).
+Coefficients here follow the RBJ Audio EQ Cookbook formulas.
+
+- `Biquad` — a stateful filter instance returned by the constructors
+  below, with a `process(&mut self, x: f32) -> f32` method for one
+  sample at a time. Carries its own internal delay line, so feeding it a
+  signal in chunks across multiple `apply_biquad` calls (or `process`
+  calls) gives the same result as one call with the whole signal.
+- `high_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad` /
+  `low_pass(freq_hz: f32, q: f32, sample_rate_hz: f32) -> Biquad` — damp
+  everything below/above `freq_hz`, with a much steeper rolloff than
+  `filter`'s single-pole versions. `q = 0.7071` gives a maximally flat
+  (Butterworth) response; higher `q` adds resonance/ringing right at the
+  corner frequency.
+- `peaking_eq(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad` —
+  boosts (`gain_db > 0`) or cuts (`gain_db < 0`) a band centered at
+  `freq_hz`; `q` controls how narrow that band is. This is a standard
+  parametric EQ band.
+- `low_shelf(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad` /
+  `high_shelf(freq_hz: f32, gain_db: f32, q: f32, sample_rate_hz: f32) -> Biquad` —
+  boost or cut everything below/above `freq_hz` by a flat `gain_db`,
+  rather than a narrow band. `q = 0.7071` gives a classic shelf slope.
+- `apply_biquad(samples: &[f32], filter: &mut Biquad) -> Vec<f32>` — runs
+  `samples` through `filter` in order, updating its internal state as it
+  goes.
+
+### `dynamics` — compression and limiting
+
+Both functions track a signal's level with a log-domain (dB) envelope
+follower — separate attack/release time constants control how fast the
+tracked level reacts to the signal getting louder vs. quieter — then
+apply a gain curve to that envelope.
+
+- `compress(samples: &[f32], sample_rate_hz: f32, threshold_db: f32, ratio: f32, attack_ms: f32, release_ms: f32, makeup_gain_db: f32) -> Vec<f32>` —
+  reduces the level of anything louder than `threshold_db`, by `ratio`
+  (e.g. `4.0` means every 4dB over the threshold becomes 1dB of output).
+  `attack_ms`/`release_ms` control how quickly gain reduction engages and
+  recovers; `makeup_gain_db` is a flat gain applied afterward to
+  compensate for the average level lost to compression.
+- `limit(samples: &[f32], sample_rate_hz: f32, ceiling_db: f32, release_ms: f32) -> Vec<f32>` —
+  a lookahead peak limiter: guarantees no output sample exceeds
+  `ceiling_db` in magnitude, by scanning a few milliseconds ahead of each
+  sample for the loudest upcoming peak and reducing gain in advance —
+  since this runs offline over a whole in-memory buffer, lookahead is
+  "free" (no real-time output delay to manage). Gain reduction is instant;
+  it recovers back toward unity over `release_ms` once a peak has passed,
+  to avoid audible pumping.
+
+### `loudness` — perceptual loudness and true-peak estimation
+
+- `integrated_loudness(samples: &[f32], sample_rate_hz: f32, channels: usize) -> f32` —
+  K-weighted, gated integrated loudness in LUFS, per ITU-R BS.1770 (the
+  standard behind streaming platforms' loudness normalization).
+  `samples` is interleaved (`channels` values per frame, e.g. `[L, R, L,
+  R, ...]` for stereo). Each channel is K-weighted (a shelf + high-pass
+  filter pair approximating human loudness perception), split into
+  overlapping 400ms blocks, and averaged with an absolute gate at -70
+  LUFS and a relative gate 10 LU below the ungated mean — this gating is
+  what keeps quiet pauses from dragging down the measured loudness of an
+  otherwise-consistent recording. All channels are weighted equally
+  (`1.0`); this omits BS.1770's surround-channel weighting (`1.41` for
+  rear channels), since this crate targets mono/stereo material.
+- `true_peak_db(samples: &[f32]) -> f32` — an inter-sample peak estimate
+  in dBFS, via FFT-based bandlimited interpolation (zero-padding each
+  block's spectrum 4x and inverse-transforming). A plain sample-peak
+  measurement can miss a peak that falls *between* two samples and would
+  clip on D/A conversion or resampling; this recovers the true
+  continuous-time peak instead.
+
 ### `peaks` — finding interesting points or regions
 
 These are the primitives domain-specific "detectors" get built from —
@@ -271,6 +347,12 @@ see [Design notes](#design-notes) below for why nothing here is named
 - **Sample rate / interval is always an explicit parameter**, never
   assumed — pass your audio sample rate in Hz, or your bar/tick interval
   as a rate, and frequency-domain results come back in the same units.
+- **`true_peak_db` reuses one FFT plan pair across blocks.** An earlier
+  version replanned the FFT per block with an arbitrary block+margin
+  size; on a real multi-minute file in an unoptimized build that measured
+  60+ seconds. Processing in fixed power-of-two windows with one reused
+  forward/inverse `rustfft` plan pair fixed that — see
+  `true_peak_of_block`'s doc comment in `loudness.rs`.
 
 ## Further reading
 
