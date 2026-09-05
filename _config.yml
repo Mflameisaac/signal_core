@@ -1,0 +1,9 @@
+# GitHub Pages config -- zero-build Jekyll site over this repo's existing
+# Markdown, so the crate's README (API reference, design notes, further
+# reading) is readable as a normal web page, not just a raw file on GitHub.
+# No index.md needed: with no index file present, GitHub Pages' default
+# Jekyll build uses README.md as the site's homepage automatically.
+title: signal-core
+description: Domain-agnostic signal-processing primitives (FFT, windowing, filtering, pitch, peak detection, resampling) for audio or any real-valued time series.
+theme: jekyll-theme-cayman
+markdown: kramdown
