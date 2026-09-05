@@ -345,9 +345,19 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(peak.is_finite());
+        // The 2s bound only holds for an optimized build -- an unoptimized
+        // (debug) build of this FFT-heavy work is meaningfully slower for
+        // reasons that have nothing to do with the bug above (measured
+        // ~27s locally, and this is exactly what's been failing in CI,
+        // which runs plain `cargo test` i.e. debug, since this test was
+        // added). Keep the tight bound where it's actually meaningful
+        // (release) and use a much looser one otherwise -- generous enough
+        // to tolerate debug/CI-runner overhead, still well under "the
+        // regression came back" territory (60+ seconds).
+        let max_seconds = if cfg!(debug_assertions) { 50.0 } else { 2.0 };
         assert!(
-            elapsed.as_secs_f32() < 2.0,
-            "true_peak_db on a ~4-minute stereo track took {:?}, expected well under 2s",
+            elapsed.as_secs_f32() < max_seconds,
+            "true_peak_db on a ~4-minute stereo track took {:?}, expected under {max_seconds}s",
             elapsed
         );
     }
