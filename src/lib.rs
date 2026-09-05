@@ -15,6 +15,7 @@ pub mod fft;
 pub mod filter;
 pub mod loudness;
 pub mod peaks;
+pub mod pitch;
 pub mod resample;
 pub mod window;
 

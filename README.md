@@ -196,6 +196,29 @@ seam disappears.
   using `sample_rate_hz`. Returns `None` for inputs under 2 samples.
   `DominantFrequency` has two fields: `frequency_hz` and `power`.
 
+### `pitch` — fundamental-frequency (F0) estimation
+
+- `PitchConfig { min_freq_hz, max_freq_hz, voicing_threshold }` — the
+  search range (in Hz) and the minimum normalized autocorrelation required
+  to call a frame periodic ("voiced") at all. `Default` is `50-1000Hz` at
+  a `0.3` threshold — wide enough to cover singing, not just
+  conversational speech's narrower range.
+- `estimate_f0(samples: &[f32], sample_rate_hz: f32, config: &PitchConfig) -> Option<f32>` —
+  the classic normalized-autocorrelation method: for each candidate lag in
+  the range `config` implies, computes `R(lag) / R(0)` and returns
+  `sample_rate_hz / lag` for whichever lag maximizes it. `None` for
+  silence, a frame too short for the requested range, an invalid `config`,
+  or a best correlation under `voicing_threshold` (not clearly periodic).
+- `estimate_f0_contour(samples: &[f32], sample_rate_hz: f32, frame_size: usize, hop_size: usize, config: &PitchConfig) -> Vec<Option<f32>>` —
+  runs `estimate_f0` over successive frames, one entry per frame (`None`
+  wherever `estimate_f0` would be).
+
+Deliberately the simplest correct version of this method: no sub-sample
+(parabolic) interpolation between lags, no octave-error correction, no
+FFT-based speedup. See `estimate_f0`'s own doc comment for the
+Wiener-Khinchin route (autocorrelation via inverse-FFT-of-power-spectrum)
+if `O(N * lag_range)` per frame ever needs to become `O(N log N)`.
+
 ### `filter` — smoothing and frequency-selective filtering
 
 - `moving_average(samples: &[f32], window_size: usize) -> Vec<f32>` — for
@@ -371,6 +394,11 @@ of increasing depth:
    Schafer — the rigorous academic reference most university DSP courses
    are built around. Worth it once the practical books' explanations
    raise questions the practical books don't answer.
+4. L.R. Rabiner, "On the Use of Autocorrelation Analysis for Pitch
+   Detection" (IEEE Transactions on Acoustics, Speech, and Signal
+   Processing, 1977) — the specific method `pitch::estimate_f0`
+   implements, if you want the original paper rather than a textbook
+   summary of it.
 
 ## License
 
